@@ -126,30 +126,42 @@ class JsonFeedbackStore(BaseFeedbackStore):
 
 
 SCHEMA_MIGRATIONS = {
-    1: [
-        '''CREATE TABLE IF NOT EXISTS feedback (
-            id TEXT PRIMARY KEY,
-            document TEXT NOT NULL,
-            suggested_tags TEXT NOT NULL,
-            accepted_tags TEXT NOT NULL,
-            rejected_tags TEXT NOT NULL,
-            user_added_tags TEXT NOT NULL,
-            final_tags TEXT NOT NULL,
-            timestamp TEXT NOT NULL,
-            metadata TEXT NOT NULL
-        )'''
-    ],
-    2: [
-        '''CREATE TABLE IF NOT EXISTS feedback_tag (
-            feedback_id TEXT NOT NULL,
-            tag TEXT NOT NULL,
-            tag_type TEXT NOT NULL CHECK(tag_type IN ('suggested', 'accepted', 'rejected', 'added', 'final')),
-            PRIMARY KEY (feedback_id, tag, tag_type),
-            FOREIGN KEY (feedback_id) REFERENCES feedback(id) ON DELETE CASCADE
-        )''',
-        '''CREATE INDEX IF NOT EXISTS idx_feedback_tag_type ON feedback_tag(tag_type)''',
-        '''CREATE INDEX IF NOT EXISTS idx_feedback_tag_name ON feedback_tag(tag)'''
-    ],
+    1: {
+        "up": [
+            '''CREATE TABLE IF NOT EXISTS feedback (
+                id TEXT PRIMARY KEY,
+                document TEXT NOT NULL,
+                suggested_tags TEXT NOT NULL,
+                accepted_tags TEXT NOT NULL,
+                rejected_tags TEXT NOT NULL,
+                user_added_tags TEXT NOT NULL,
+                final_tags TEXT NOT NULL,
+                timestamp TEXT NOT NULL,
+                metadata TEXT NOT NULL
+            )'''
+        ],
+        "down": [
+            '''DROP TABLE IF EXISTS feedback'''
+        ]
+    },
+    2: {
+        "up": [
+            '''CREATE TABLE IF NOT EXISTS feedback_tag (
+                feedback_id TEXT NOT NULL,
+                tag TEXT NOT NULL,
+                tag_type TEXT NOT NULL CHECK(tag_type IN ('suggested', 'accepted', 'rejected', 'added', 'final')),
+                PRIMARY KEY (feedback_id, tag, tag_type),
+                FOREIGN KEY (feedback_id) REFERENCES feedback(id) ON DELETE CASCADE
+            )''',
+            '''CREATE INDEX IF NOT EXISTS idx_feedback_tag_type ON feedback_tag(tag_type)''',
+            '''CREATE INDEX IF NOT EXISTS idx_feedback_tag_name ON feedback_tag(tag)'''
+        ],
+        "down": [
+            '''DROP INDEX IF EXISTS idx_feedback_tag_name''',
+            '''DROP INDEX IF EXISTS idx_feedback_tag_type''',
+            '''DROP TABLE IF EXISTS feedback_tag'''
+        ]
+    },
 }
 
 CURRENT_SCHEMA_VERSION = max(SCHEMA_MIGRATIONS.keys())
@@ -187,13 +199,28 @@ class SqliteFeedbackStore(BaseFeedbackStore):
 
         for version in sorted(SCHEMA_MIGRATIONS.keys()):
             if version > current_version:
-                for sql in SCHEMA_MIGRATIONS[version]:
+                migration = SCHEMA_MIGRATIONS[version]
+                for sql in migration["up"]:
                     cursor.execute(sql)
                 cursor.execute(
                     "INSERT INTO schema_version (version, applied_at) VALUES (?, ?)",
                     (version, datetime.now().isoformat())
                 )
                 conn.commit()
+
+    def _run_rollback(self, conn: sqlite3.Connection, target_version: int):
+        cursor = conn.cursor()
+        cursor.execute("SELECT version FROM schema_version ORDER BY version DESC")
+        applied_versions = [r[0] for r in cursor.fetchall()]
+
+        for version in applied_versions:
+            if version > target_version:
+                migration = SCHEMA_MIGRATIONS.get(version)
+                if migration and "down" in migration:
+                    for sql in migration["down"]:
+                        cursor.execute(sql)
+                    cursor.execute("DELETE FROM schema_version WHERE version = ?", (version,))
+                    conn.commit()
 
     def get_schema_version(self) -> int:
         conn = self._get_conn()
@@ -202,6 +229,32 @@ class SqliteFeedbackStore(BaseFeedbackStore):
         row = cursor.fetchone()
         conn.close()
         return row[0] if row[0] is not None else 0
+
+    def rollback(self, target_version: int = 0) -> int:
+        if target_version < 0:
+            raise ValueError("target_version 必须 >= 0")
+        if target_version >= self.get_schema_version():
+            return 0
+        conn = self._get_conn()
+        try:
+            prev = self.get_schema_version()
+            self._run_rollback(conn, target_version)
+            new_version = self.get_schema_version()
+            return prev - new_version
+        finally:
+            conn.close()
+
+    def upgrade(self, target_version: Optional[int] = None) -> int:
+        if target_version is None:
+            target_version = CURRENT_SCHEMA_VERSION
+        conn = self._get_conn()
+        try:
+            prev = self.get_schema_version()
+            self._run_migrations(conn)
+            new_version = self.get_schema_version()
+            return new_version - prev
+        finally:
+            conn.close()
 
     def _tags_to_json(self, tags: List[str]) -> str:
         return json.dumps(tags, ensure_ascii=False)

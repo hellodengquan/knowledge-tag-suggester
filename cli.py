@@ -37,6 +37,10 @@ def cmd_train(args):
         validate_int_range(args.max_features, "--max-features", min_val=1, max_val=100000)
         validate_int_range(args.top_k, "--top-k", min_val=1, max_val=100)
         validate_float_range(args.threshold, "--threshold", min_val=0.0, max_val=1.0)
+        if bool(args.summary_field) != bool(args.tags_field):
+            raise ValidationError(
+                "--summary-field 和 --tags-field 必须同时指定或都不指定"
+            )
     except ValidationError as e:
         print(f"参数错误: {e}", file=sys.stderr)
         sys.exit(1)
@@ -89,6 +93,16 @@ def cmd_suggest(args):
             validate_file_exists(args.tag_descriptions, "--tag-descriptions")
         if args.input_file:
             validate_file_exists(args.input_file, "--input-file")
+        if args.document and args.input_file:
+            raise ValidationError("--document 和 --input-file 互斥，只能指定其中一个")
+        if not args.document and not args.input_file:
+            raise ValidationError("--document 或 --input-file 必须至少指定一个")
+        if not os.path.exists(args.model) and not args.tag_descriptions:
+            raise ValidationError(
+                f"模型文件 {args.model} 不存在，冷启动模式下需要通过 --tag-descriptions 指定标签描述"
+            )
+        if args.explain_words != 3 and not args.explain:
+            raise ValidationError("--explain-words 只能在 --explain 开启时使用")
     except ValidationError as e:
         print(f"参数错误: {e}", file=sys.stderr)
         sys.exit(1)
@@ -221,28 +235,53 @@ def cmd_feedback(args):
 
 
 def cmd_migrate(args):
-    try:
-        validate_file_exists(args.db_path, "--db-path")
-    except ValidationError as e:
-        print(f"参数错误: {e}", file=sys.stderr)
-        sys.exit(1)
+    if args.action != "status":
+        try:
+            if not os.path.exists(args.db_path):
+                raise ValidationError(f"--db-path 文件不存在: {args.db_path}")
+        except ValidationError as e:
+            print(f"参数错误: {e}", file=sys.stderr)
+            sys.exit(1)
 
     store = SqliteFeedbackStore(db_path=args.db_path)
     current_version = store.get_schema_version()
 
     if args.action == "status":
+        from feedback_store import CURRENT_SCHEMA_VERSION
         print(f"数据库: {args.db_path}")
         print(f"当前 schema 版本: {current_version}")
-        print(f"最新 schema 版本: {max(__import__('feedback_store').CURRENT_SCHEMA_VERSION, current_version)}")
+        print(f"最新 schema 版本: {max(CURRENT_SCHEMA_VERSION, current_version)}")
+
+    elif args.action == "upgrade":
+        from feedback_store import CURRENT_SCHEMA_VERSION
+        target = args.target_version if args.target_version is not None else CURRENT_SCHEMA_VERSION
+        if target < current_version:
+            print(f"目标版本 {target} 小于当前版本 {current_version}，请使用 rollback", file=sys.stderr)
+            sys.exit(1)
+        applied = store.upgrade(target_version=target)
+        print(f"已升级 {applied} 个版本，当前 schema 版本: {store.get_schema_version()}")
+
+    elif args.action == "rollback":
+        if args.target_version is None:
+            print("错误: rollback 需要 --target-version 指定目标版本", file=sys.stderr)
+            sys.exit(1)
+        try:
+            validate_int_range(args.target_version, "--target-version", min_val=0)
+        except ValidationError as e:
+            print(f"参数错误: {e}", file=sys.stderr)
+            sys.exit(1)
+        reverted = store.rollback(target_version=args.target_version)
+        print(f"已回滚 {reverted} 个版本，当前 schema 版本: {store.get_schema_version()}")
 
     elif args.action == "backfill":
         if current_version < 2:
-            print("错误: schema 版本 < 2，请先运行迁移", file=sys.stderr)
+            print("错误: schema 版本 < 2，请先运行 upgrade", file=sys.stderr)
             sys.exit(1)
         count = store.backfill_tag_table()
         print(f"已回填 {count} 条反馈的标签到 feedback_tag 表")
 
     else:
+        from feedback_store import CURRENT_SCHEMA_VERSION
         print(f"当前 schema 版本: {current_version}")
         print(f"迁移完成，数据库已是最新版本")
 
@@ -460,11 +499,13 @@ def main():
     migrate_parser = subparsers.add_parser(
         "migrate",
         help="管理 SQLite schema 版本与数据回填",
-        description="查看 SQLite 数据库的 schema 版本、执行迁移、回填标签索引表。",
+        description="查看 SQLite 数据库的 schema 版本、执行前向升级、回滚、回填标签索引表。",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""\
 子命令:
   status    查看 schema 版本信息
+  upgrade   前向升级到最新或指定版本 (--target-version)
+  rollback  回滚到指定版本 (需要 --target-version)
   backfill  将 feedback 表中的标签数据回填到 feedback_tag 索引表
 
 Schema 版本历史:
@@ -479,6 +520,15 @@ Schema 版本历史:
     migrate_sub = migrate_parser.add_subparsers(dest="action", metavar="ACTION")
 
     migrate_sub.add_parser("status", help="查看当前 schema 版本")
+
+    up_p = migrate_sub.add_parser("upgrade", help="前向升级 schema 到最新或指定版本")
+    up_p.add_argument("--target-version", type=int, default=None,
+                      help="目标版本 (默认: 最新版本)")
+
+    rb_p = migrate_sub.add_parser("rollback", help="回滚 schema 到指定版本")
+    rb_p.add_argument("--target-version", type=int, required=True,
+                      help="目标版本 (必须指定，0 表示完全回滚)")
+
     migrate_sub.add_parser("backfill", help="回填 feedback_tag 索引表")
 
     migrate_parser.set_defaults(func=cmd_migrate)

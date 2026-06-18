@@ -94,5 +94,37 @@
       "source": "demo",
       "doc_title": "测试文档1 - 深度学习与NLP"
     }
+  },
+  {
+    "id": "fb_1781826297676",
+    "document": "本文研究了基于Transformer的预训练语言模型在文本分类任务中的表现，通过微调BERT模型实现了较高的准确率。",
+    "suggested_tags": [
+      "人工智能",
+      "深度学习",
+      "数据挖掘",
+      "机器学习",
+      "算法"
+    ],
+    "accepted_tags": [
+      "人工智能",
+      "深度学习"
+    ],
+    "rejected_tags": [
+      "数据挖掘",
+      "机器学习"
+    ],
+    "user_added_tags": [
+      "预训练模型"
+    ],
+    "final_tags": [
+      "人工智能",
+      "深度学习",
+      "预训练模型"
+    ],
+    "timestamp": "2026-06-19T07:44:57.676420",
+    "metadata": {
+      "source": "demo",
+      "doc_title": "测试文档1 - 深度学习与NLP"
+    }
   }
 ]

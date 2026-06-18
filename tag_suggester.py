@@ -76,8 +76,16 @@ class TagSuggester:
         top_k = top_k if top_k is not None else self.default_top_k
         threshold = threshold if threshold is not None else self.default_threshold
         if not self.is_trained:
+            self._ensure_cold_start_vectorizer(document)
             return self._suggest_by_similarity(document, top_k, threshold)
         return self._suggest_by_classifier(document, top_k, threshold)
+
+    def _ensure_cold_start_vectorizer(self, document: str):
+        vocab_sources = list(self.tag_descriptions.values()) + [document]
+        try:
+            self.vectorizer.transform(vocab_sources)
+        except Exception:
+            self.vectorizer.fit(vocab_sources)
 
     def _suggest_by_classifier(self, document: str, top_k: int, threshold: float) -> Tuple[List[str], List[float]]:
         X = self.vectorizer.transform([document])
