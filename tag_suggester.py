@@ -12,9 +12,17 @@ import os
 
 
 class TagSuggester:
-    def __init__(self, stop_words: Optional[List[str]] = None, max_features: int = 5000):
+    def __init__(
+        self,
+        stop_words: Optional[List[str]] = None,
+        max_features: int = 5000,
+        default_top_k: int = 5,
+        default_threshold: float = 0.1
+    ):
         self.max_features = max_features
         self.stop_words = stop_words or []
+        self.default_top_k = default_top_k
+        self.default_threshold = default_threshold
         self.vectorizer = TfidfVectorizer(
             max_features=max_features,
             tokenizer=self._tokenize,
@@ -59,9 +67,16 @@ class TagSuggester:
             else:
                 self.tag_vectors[tag] = np.zeros(self.vectorizer.vocabulary_.__len__())
 
-    def suggest(self, document: str, top_k: int = 5, threshold: float = 0.1) -> Tuple[List[str], List[float]]:
+    def suggest(
+        self,
+        document: str,
+        top_k: Optional[int] = None,
+        threshold: Optional[float] = None
+    ) -> Tuple[List[str], List[float]]:
+        top_k = top_k if top_k is not None else self.default_top_k
+        threshold = threshold if threshold is not None else self.default_threshold
         if not self.is_trained:
-            return self._suggest_by_similarity(document, top_k)
+            return self._suggest_by_similarity(document, top_k, threshold)
         return self._suggest_by_classifier(document, top_k, threshold)
 
     def _suggest_by_classifier(self, document: str, top_k: int, threshold: float) -> Tuple[List[str], List[float]]:
@@ -75,7 +90,7 @@ class TagSuggester:
         result_scores = [s for t, s in sorted_tags if s >= threshold][:top_k]
         return result_tags, result_scores
 
-    def _suggest_by_similarity(self, document: str, top_k: int) -> Tuple[List[str], List[float]]:
+    def _suggest_by_similarity(self, document: str, top_k: int, threshold: float) -> Tuple[List[str], List[float]]:
         if not self.tag_descriptions:
             return [], []
         doc_vec = self.vectorizer.transform([document])
@@ -85,7 +100,8 @@ class TagSuggester:
             sim = cosine_similarity(doc_vec, desc_vec)[0][0]
             scores[tag] = sim
         sorted_tags = sorted(scores.items(), key=lambda x: x[1], reverse=True)
-        return [t for t, s in sorted_tags[:top_k]], [s for t, s in sorted_tags[:top_k]]
+        filtered = [(t, s) for t, s in sorted_tags if s >= threshold][:top_k]
+        return [t for t, s in filtered], [s for t, s in filtered]
 
     def partial_fit(self, documents: List[str], tags_list: List[List[str]]):
         if not self.is_trained:

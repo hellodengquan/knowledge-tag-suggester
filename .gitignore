@@ -1,3 +1,6 @@
 __pycache__/
 *.pyc
 .venv/
+cli_feedback.db
+cli_feedback.json
+cli_model.pkl
