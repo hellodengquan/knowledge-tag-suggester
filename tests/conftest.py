@@ -8,6 +8,21 @@ PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, PROJECT_ROOT)
 
 
+@pytest.fixture(autouse=True)
+def reset_cli_config_cache(monkeypatch):
+    """在每个测试前后清空 cli._cfg 与 cli.main 可能遗留的全局状态。"""
+    import cli as cli_module
+    if hasattr(cli_module._cfg, "_cache"):
+        del cli_module._cfg._cache
+    if hasattr(cli_module._cfg, "_config_path"):
+        del cli_module._cfg._config_path
+    yield
+    if hasattr(cli_module._cfg, "_cache"):
+        del cli_module._cfg._cache
+    if hasattr(cli_module._cfg, "_config_path"):
+        del cli_module._cfg._config_path
+
+
 @pytest.fixture
 def tmp_db_path(tmp_path):
     """返回一个临时 SQLite 数据库路径 (文件不存在)。"""
@@ -49,15 +64,12 @@ def cli_runner(tmp_path, monkeypatch):
     def _run(cli_args):
         from cli import main
 
-        argv = ["tag-suggester"] + cli_args
-        monkeypatch.setattr(sys, "argv", argv)
-
         stdout_capture = io.StringIO()
         stderr_capture = io.StringIO()
         exit_code = 0
         try:
             with redirect_stdout(stdout_capture), redirect_stderr(stderr_capture):
-                main()
+                main(argv=cli_args)
         except SystemExit as e:
             exit_code = e.code if e.code is not None else 0
 

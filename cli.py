@@ -6,20 +6,31 @@ import json
 from tag_suggester import TagSuggester
 from feedback_store import create_feedback_store, SqliteFeedbackStore
 from tag_explainer import TagExplainer
+from config_loader import AppConfig
 
 
 class ValidationError(Exception):
     pass
 
 
-def validate_int_range(value, name, min_val=None, max_val=None):
+def _cfg() -> AppConfig:
+    """返回当前加载的全局配置 (惰性加载)。"""
+    if not getattr(_cfg, "_cache", None):
+        path = getattr(_cfg, "_config_path", None)
+        _cfg._cache = AppConfig.load(path)
+    return _cfg._cache
+
+
+def validate_int_range(value, name, spec_key: str):
+    min_val, max_val = _cfg().get_range(spec_key)
     if min_val is not None and value < min_val:
         raise ValidationError(f"{name} 不能小于 {min_val}，当前值: {value}")
     if max_val is not None and value > max_val:
         raise ValidationError(f"{name} 不能大于 {max_val}，当前值: {value}")
 
 
-def validate_float_range(value, name, min_val=None, max_val=None):
+def validate_float_range(value, name, spec_key: str):
+    min_val, max_val = _cfg().get_range(spec_key)
     if min_val is not None and value < min_val:
         raise ValidationError(f"{name} 不能小于 {min_val}，当前值: {value}")
     if max_val is not None and value > max_val:
@@ -31,16 +42,28 @@ def validate_file_exists(path, name):
         raise ValidationError(f"{name} 文件不存在: {path}")
 
 
+def _range_help(spec_key: str) -> str:
+    """根据配置中的校验范围生成 help 文本片段。"""
+    min_val, max_val = _cfg().get_range(spec_key)
+    parts = []
+    if min_val is not None and max_val is not None:
+        parts.append(f"范围: {min_val}-{max_val}")
+    elif min_val is not None:
+        parts.append(f"范围: ≥{min_val}")
+    elif max_val is not None:
+        parts.append(f"范围: ≤{max_val}")
+    return ", ".join(parts) if parts else ""
+
+
 def cmd_train(args):
+    cfg = _cfg()
     try:
         validate_file_exists(args.input, "--input")
-        validate_int_range(args.max_features, "--max-features", min_val=1, max_val=100000)
-        validate_int_range(args.top_k, "--top-k", min_val=1, max_val=100)
-        validate_float_range(args.threshold, "--threshold", min_val=0.0, max_val=1.0)
+        validate_int_range(args.max_features, "--max-features", "validation.max_features")
+        validate_int_range(args.top_k, "--top-k", "validation.top_k")
+        validate_float_range(args.threshold, "--threshold", "validation.threshold")
         if bool(args.summary_field) != bool(args.tags_field):
-            raise ValidationError(
-                "--summary-field 和 --tags-field 必须同时指定或都不指定"
-            )
+            raise ValidationError("--summary-field 和 --tags-field 必须同时指定或都不指定")
     except ValidationError as e:
         print(f"参数错误: {e}", file=sys.stderr)
         sys.exit(1)
@@ -56,11 +79,13 @@ def cmd_train(args):
 
     documents = []
     tags_list = []
+    auto_summary_field = cfg.get("model.default_fields.summary_field")
+    auto_tags_field = cfg.get("model.default_fields.tags_field")
     for item in data:
         if args.summary_field and args.summary_field in item:
             text = item[args.summary_field]
-        elif "summary" in item:
-            text = item["summary"]
+        elif auto_summary_field and auto_summary_field in item:
+            text = item[auto_summary_field]
         elif "content" in item:
             text = item["content"]
         else:
@@ -68,8 +93,8 @@ def cmd_train(args):
 
         if args.tags_field and args.tags_field in item:
             tags = item[args.tags_field]
-        elif "tags" in item:
-            tags = item["tags"]
+        elif auto_tags_field and auto_tags_field in item:
+            tags = item[auto_tags_field]
         else:
             tags = []
 
@@ -85,10 +110,10 @@ def cmd_train(args):
 def cmd_suggest(args):
     try:
         if args.top_k is not None:
-            validate_int_range(args.top_k, "--top-k", min_val=1, max_val=100)
+            validate_int_range(args.top_k, "--top-k", "validation.top_k")
         if args.threshold is not None:
-            validate_float_range(args.threshold, "--threshold", min_val=0.0, max_val=1.0)
-        validate_int_range(args.explain_words, "--explain-words", min_val=1, max_val=20)
+            validate_float_range(args.threshold, "--threshold", "validation.threshold")
+        validate_int_range(args.explain_words, "--explain-words", "validation.explain_words")
         if args.tag_descriptions:
             validate_file_exists(args.tag_descriptions, "--tag-descriptions")
         if args.input_file:
@@ -101,7 +126,7 @@ def cmd_suggest(args):
             raise ValidationError(
                 f"模型文件 {args.model} 不存在，冷启动模式下需要通过 --tag-descriptions 指定标签描述"
             )
-        if args.explain_words != 3 and not args.explain:
+        if args.explain_words != _cfg().get("suggest.explain_words") and not args.explain:
             raise ValidationError("--explain-words 只能在 --explain 开启时使用")
     except ValidationError as e:
         print(f"参数错误: {e}", file=sys.stderr)
@@ -194,8 +219,8 @@ def cmd_feedback(args):
     elif args.action == "list":
         try:
             if args.limit is not None:
-                validate_int_range(args.limit, "--limit", min_val=1, max_val=10000)
-            validate_int_range(args.offset, "--offset", min_val=0)
+                validate_int_range(args.limit, "--limit", "validation.limit")
+            validate_int_range(args.offset, "--offset", "validation.offset")
         except ValidationError as e:
             print(f"参数错误: {e}", file=sys.stderr)
             sys.exit(1)
@@ -235,6 +260,7 @@ def cmd_feedback(args):
 
 
 def cmd_migrate(args):
+    cfg = _cfg()
     if args.action != "status":
         try:
             if not os.path.exists(args.db_path):
@@ -245,15 +271,14 @@ def cmd_migrate(args):
 
     store = SqliteFeedbackStore(db_path=args.db_path)
     current_version = store.get_schema_version()
+    from feedback_store import CURRENT_SCHEMA_VERSION
 
     if args.action == "status":
-        from feedback_store import CURRENT_SCHEMA_VERSION
         print(f"数据库: {args.db_path}")
         print(f"当前 schema 版本: {current_version}")
         print(f"最新 schema 版本: {max(CURRENT_SCHEMA_VERSION, current_version)}")
 
     elif args.action == "upgrade":
-        from feedback_store import CURRENT_SCHEMA_VERSION
         target = args.target_version if args.target_version is not None else CURRENT_SCHEMA_VERSION
         if target < current_version:
             print(f"目标版本 {target} 小于当前版本 {current_version}，请使用 rollback", file=sys.stderr)
@@ -266,7 +291,9 @@ def cmd_migrate(args):
             print("错误: rollback 需要 --target-version 指定目标版本", file=sys.stderr)
             sys.exit(1)
         try:
-            validate_int_range(args.target_version, "--target-version", min_val=0)
+            min_val, _ = cfg.get_range("validation.offset")
+            if args.target_version < (min_val or 0):
+                raise ValidationError(f"--target-version 不能小于 {min_val or 0}")
         except ValidationError as e:
             print(f"参数错误: {e}", file=sys.stderr)
             sys.exit(1)
@@ -281,15 +308,14 @@ def cmd_migrate(args):
         print(f"已回填 {count} 条反馈的标签到 feedback_tag 表")
 
     else:
-        from feedback_store import CURRENT_SCHEMA_VERSION
         print(f"当前 schema 版本: {current_version}")
         print(f"迁移完成，数据库已是最新版本")
 
 
 def cmd_retrain(args):
     try:
-        validate_int_range(args.top_k, "--top-k", min_val=1, max_val=100)
-        validate_float_range(args.threshold, "--threshold", min_val=0.0, max_val=1.0)
+        validate_int_range(args.top_k, "--top-k", "validation.top_k")
+        validate_float_range(args.threshold, "--threshold", "validation.threshold")
     except ValidationError as e:
         print(f"参数错误: {e}", file=sys.stderr)
         sys.exit(1)
@@ -325,10 +351,11 @@ def cmd_retrain(args):
     print(f"模型已更新并保存到: {args.model}")
 
 
-def main():
+def _build_parser() -> argparse.ArgumentParser:
+    cfg = _cfg()
     parser = argparse.ArgumentParser(
-        prog="tag-suggester",
-        description="知识标签推荐器 — 基于 TF-IDF + 多标签分类的文档标签推荐工具",
+        prog=cfg.get("cli.prog_name", "tag-suggester"),
+        description=cfg.get("cli.description"),
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""\
 可用命令:
@@ -359,6 +386,10 @@ def main():
   tag-suggester retrain -m model.pkl --backend sqlite -s data.db
 """
     )
+    parser.add_argument(
+        "-C", "--config", default=None,
+        help="指定配置文件路径 (默认按顺序查找 tag_suggester_config.json / ~/.tag_suggester_config.json / $TAG_SUGGESTER_CONFIG)"
+    )
     subparsers = parser.add_subparsers(dest="command", metavar="COMMAND")
 
     # ── train ──
@@ -373,28 +404,28 @@ def main():
         help="训练数据 JSON 文件 (每项含 summary + tags 字段)"
     )
     train_parser.add_argument(
-        "-m", "--model", default="tag_model.pkl",
-        help="模型输出路径 (默认: tag_model.pkl)"
+        "-m", "--model", default=cfg.get("model.default_model_path"),
+        help=f"模型输出路径 (默认: {cfg.get('model.default_model_path')})"
     )
     train_parser.add_argument(
         "--summary-field", default=None,
-        help="文档摘要字段名 (默认依次尝试 summary/content)"
+        help=f"文档摘要字段名 (默认依次尝试 {cfg.get('model.default_fields.summary_field')}/content)"
     )
     train_parser.add_argument(
         "--tags-field", default=None,
-        help="标签字段名 (默认: tags)"
+        help=f"标签字段名 (默认: {cfg.get('model.default_fields.tags_field')})"
     )
     train_parser.add_argument(
-        "--max-features", type=int, default=5000,
-        help="TF-IDF 最大特征数 (范围: 1-100000, 默认: 5000)"
+        "--max-features", type=int, default=cfg.get("model.max_features"),
+        help=f"TF-IDF 最大特征数 ({_range_help('validation.max_features')}, 默认: {cfg.get('model.max_features')})"
     )
     train_parser.add_argument(
-        "-k", "--top-k", type=int, default=5,
-        help="默认返回标签数量 (范围: 1-100, 默认: 5)"
+        "-k", "--top-k", type=int, default=cfg.get("model.default_top_k"),
+        help=f"默认返回标签数量 ({_range_help('validation.top_k')}, 默认: {cfg.get('model.default_top_k')})"
     )
     train_parser.add_argument(
-        "-t", "--threshold", type=float, default=0.1,
-        help="默认置信度阈值 (范围: 0.0-1.0, 默认: 0.1)"
+        "-t", "--threshold", type=float, default=cfg.get("model.default_threshold"),
+        help=f"默认置信度阈值 ({_range_help('validation.threshold')}, 默认: {cfg.get('model.default_threshold')})"
     )
     train_parser.set_defaults(func=cmd_train)
 
@@ -414,8 +445,8 @@ def main():
         help="从文件读取文档内容"
     )
     suggest_parser.add_argument(
-        "-m", "--model", default="tag_model.pkl",
-        help="模型文件路径 (默认: tag_model.pkl)"
+        "-m", "--model", default=cfg.get("model.default_model_path"),
+        help=f"模型文件路径 (默认: {cfg.get('model.default_model_path')})"
     )
     suggest_parser.add_argument(
         "--tag-descriptions", default=None,
@@ -423,19 +454,19 @@ def main():
     )
     suggest_parser.add_argument(
         "-k", "--top-k", type=int, default=None,
-        help="返回标签数量 (范围: 1-100, 不指定则使用模型默认值)"
+        help=f"返回标签数量 ({_range_help('validation.top_k')}, 不指定则使用模型默认值)"
     )
     suggest_parser.add_argument(
         "-t", "--threshold", type=float, default=None,
-        help="置信度阈值 (范围: 0.0-1.0, 不指定则使用模型默认值)"
+        help=f"置信度阈值 ({_range_help('validation.threshold')}, 不指定则使用模型默认值)"
     )
     suggest_parser.add_argument(
         "--explain", action="store_true",
         help="显示每个推荐标签的依据"
     )
     suggest_parser.add_argument(
-        "--explain-words", type=int, default=3,
-        help="解释时显示的关键词数量 (范围: 1-20, 默认: 3)"
+        "--explain-words", type=int, default=cfg.get("suggest.explain_words"),
+        help=f"解释时显示的关键词数量 ({_range_help('validation.explain_words')}, 默认: {cfg.get('suggest.explain_words')})"
     )
     suggest_parser.add_argument(
         "-o", "--json-output", default=None,
@@ -451,12 +482,12 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter
     )
     feedback_parser.add_argument(
-        "--backend", choices=["json", "sqlite"], default="json",
-        help="存储后端 (默认: json)"
+        "--backend", choices=["json", "sqlite"], default=cfg.get("feedback.default_backend"),
+        help=f"存储后端 (默认: {cfg.get('feedback.default_backend')})"
     )
     feedback_parser.add_argument(
         "-s", "--storage", default=None,
-        help="存储文件路径 (json: *.json, sqlite: *.db)"
+        help=f"存储文件路径 (json: {cfg.get('feedback.storage.json')}, sqlite: {cfg.get('feedback.storage.sqlite')})"
     )
     feedback_sub = feedback_parser.add_subparsers(dest="action", metavar="ACTION")
 
@@ -478,11 +509,11 @@ def main():
     )
     fb_list.add_argument(
         "-n", "--limit", type=int, default=None,
-        help="返回记录数 (范围: 1-10000)"
+        help=f"返回记录数 ({_range_help('validation.limit')})"
     )
     fb_list.add_argument(
         "--offset", type=int, default=0,
-        help="偏移量 (范围: ≥0, 默认: 0)"
+        help=f"偏移量 ({_range_help('validation.offset')}, 默认: 0)"
     )
 
     feedback_sub.add_parser("stats", help="显示反馈统计")
@@ -514,8 +545,8 @@ Schema 版本历史:
 """
     )
     migrate_parser.add_argument(
-        "--db-path", default="feedback_data.db",
-        help="SQLite 数据库路径 (默认: feedback_data.db)"
+        "--db-path", default=cfg.get("migrate.default_db_path"),
+        help=f"SQLite 数据库路径 (默认: {cfg.get('migrate.default_db_path')})"
     )
     migrate_sub = migrate_parser.add_subparsers(dest="action", metavar="ACTION")
 
@@ -541,28 +572,45 @@ Schema 版本历史:
         formatter_class=argparse.RawDescriptionHelpFormatter
     )
     retrain_parser.add_argument(
-        "-m", "--model", default="tag_model.pkl",
-        help="模型文件路径 (默认: tag_model.pkl)"
+        "-m", "--model", default=cfg.get("model.default_model_path"),
+        help=f"模型文件路径 (默认: {cfg.get('model.default_model_path')})"
     )
     retrain_parser.add_argument(
-        "--backend", choices=["json", "sqlite"], default="json",
-        help="存储后端 (默认: json)"
+        "--backend", choices=["json", "sqlite"], default=cfg.get("feedback.default_backend"),
+        help=f"存储后端 (默认: {cfg.get('feedback.default_backend')})"
     )
     retrain_parser.add_argument(
         "-s", "--storage", default=None,
         help="存储文件路径"
     )
     retrain_parser.add_argument(
-        "-k", "--top-k", type=int, default=5,
-        help="默认返回标签数量 (范围: 1-100, 默认: 5)"
+        "-k", "--top-k", type=int, default=cfg.get("model.default_top_k"),
+        help=f"默认返回标签数量 ({_range_help('validation.top_k')}, 默认: {cfg.get('model.default_top_k')})"
     )
     retrain_parser.add_argument(
-        "-t", "--threshold", type=float, default=0.1,
-        help="默认置信度阈值 (范围: 0.0-1.0, 默认: 0.1)"
+        "-t", "--threshold", type=float, default=cfg.get("model.default_threshold"),
+        help=f"默认置信度阈值 ({_range_help('validation.threshold')}, 默认: {cfg.get('model.default_threshold')})"
     )
     retrain_parser.set_defaults(func=cmd_retrain)
 
-    args = parser.parse_args()
+    return parser
+
+
+def main(argv=None):
+    if argv is None:
+        argv = sys.argv[1:]
+
+    # 提前解析 --config，在构建完整 argparse 之前加载自定义配置
+    config_pre = argparse.ArgumentParser(add_help=False)
+    config_pre.add_argument("-C", "--config", default=None)
+    pre_args, _ = config_pre.parse_known_args(argv)
+    if pre_args.config:
+        _cfg._config_path = pre_args.config
+        _cfg._cache = None
+
+    parser = _build_parser()
+    cfg = _cfg()
+    args = parser.parse_args(argv)
 
     if args.command is None:
         parser.print_help()
@@ -571,9 +619,9 @@ Schema 版本历史:
     if hasattr(args, 'storage') and args.storage is None:
         if hasattr(args, 'backend'):
             if args.backend == "json":
-                args.storage = "feedback_data.json"
+                args.storage = cfg.get("feedback.storage.json")
             else:
-                args.storage = "feedback_data.db"
+                args.storage = cfg.get("feedback.storage.sqlite")
 
     args.func(args)
 
